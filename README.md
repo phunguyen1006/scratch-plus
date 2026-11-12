@@ -54,6 +54,8 @@ brew install --cask erictli/tap/scratch
 
 Download the latest `.exe` installer from [Releases](https://github.com/erictli/scratch/releases) and run it. WebView2 will be downloaded automatically if needed.
 
+To build a Windows x64 installer from this fork with GitHub Actions, see [Windows test builds](docs/windows-test-build.md).
+
 ### Linux
 
 Download the latest `.AppImage` or `.deb` from [Releases](https://github.com/erictli/scratch/releases).
