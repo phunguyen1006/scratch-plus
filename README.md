@@ -72,6 +72,13 @@ npm run tauri dev      # Development
 npm run tauri build    # Production build
 ```
 
+## Journal
+
+The optional Journal mode adds a full-width Home dashboard, separate Daily and
+Dream journals, search filters, insights and On This Day. Both collections use
+local Markdown files. See [Journal preview](docs/JOURNAL.md) for storage,
+sample data and current limitations.
+
 ## Keyboard Shortcuts
 
 Scratch is designed to be usable without a mouse. Here are the essentials to get started:

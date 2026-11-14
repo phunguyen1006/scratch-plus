@@ -43,9 +43,20 @@ export type ThemeColorKey =
 // Partial map of color overrides (hex strings)
 export type CustomColors = Partial<Record<ThemeColorKey, string>>;
 
+export interface JournalSettings {
+  enabled: boolean;
+  root: string;
+  openToday: boolean;
+  showCalendar: boolean;
+  showMetrics: boolean;
+  showMemories: boolean;
+  showHeatmap: boolean;
+}
+
 // Per-folder settings (stored in .scratch/settings.json)
 export interface Settings {
   theme: ThemeSettings;
+  journal?: JournalSettings;
   editorFont?: EditorFontSettings;
   gitEnabled?: boolean;
   foldersEnabled?: boolean;

@@ -30,8 +30,10 @@ import {
 } from "@tauri-apps/plugin-updater";
 import { getCurrentWindow } from "@tauri-apps/api/window";
 import * as aiService from "./services/ai";
+import * as notesService from "./services/notes";
 import type { AiProvider } from "./services/ai";
 import { isMac, isWindows } from "./lib/platform";
+import type { JournalPanel } from "./lib/journalNavigation";
 
 // Detect preview mode from URL search params
 function getWindowMode(): {
@@ -72,12 +74,72 @@ function AppContent() {
   const [paletteOpen, setPaletteOpen] = useState(false);
   const [view, setView] = useState<ViewState>("notes");
   const [sidebarVisible, setSidebarVisible] = useState(true);
+  const [activePanel, setActivePanel] = useState<JournalPanel | null>(null);
+  const selectedNoteIdRef = useRef(selectedNoteId);
+  selectedNoteIdRef.current = selectedNoteId;
+  const journalAutoOpenedRef = useRef(false);
   const [aiModalOpen, setAiModalOpen] = useState(false);
   const [shortcutsOpen, setShortcutsOpen] = useState(false);
   const [aiEditing, setAiEditing] = useState(false);
   const [focusMode, setFocusMode] = useState(false);
   const [aiProvider, setAiProvider] = useState<AiProvider>("claude");
   const editorRef = useRef<TiptapEditor | null>(null);
+
+  useEffect(() => {
+    const focusEditor = () => editorRef.current?.commands.focus("end");
+    window.addEventListener("journal-focus-editor", focusEditor);
+    return () => window.removeEventListener("journal-focus-editor", focusEditor);
+  }, []);
+
+  useEffect(() => {
+    const openEditor = () => setActivePanel(null);
+    const navigate = (event: Event) => {
+      setView("notes");
+      setActivePanel((event as CustomEvent<JournalPanel>).detail);
+    };
+    window.addEventListener("journal-open-editor", openEditor);
+    window.addEventListener("journal-navigate", navigate);
+    return () => { window.removeEventListener("journal-open-editor", openEditor); window.removeEventListener("journal-navigate", navigate); };
+  }, []);
+
+  useEffect(() => {
+    let cancelled = false;
+    const syncJournalPanel = () => {
+      notesService.getSettings().then((s) => {
+        if (cancelled) return;
+        const journal = s.journal;
+        if (!journal?.enabled) {
+          journalAutoOpenedRef.current = false;
+          setActivePanel(null);
+          return;
+        }
+        if (!journal.openToday && !selectedNoteIdRef.current && !journalAutoOpenedRef.current) {
+          journalAutoOpenedRef.current = true;
+          setActivePanel("home");
+        } else {
+          journalAutoOpenedRef.current = true;
+        }
+      }).catch((error) => {
+        console.error("Failed to load journal settings:", error);
+      });
+    };
+    syncJournalPanel();
+    window.addEventListener("journal-settings-changed", syncJournalPanel);
+    return () => {
+      cancelled = true;
+      window.removeEventListener("journal-settings-changed", syncJournalPanel);
+    };
+  }, [notesFolder]);
+
+  const togglePanel = useCallback((panel: JournalPanel) => {
+    setActivePanel((current) => (current === panel && selectedNoteIdRef.current ? null : panel));
+  }, []);
+  const openPanel = useCallback((panel: JournalPanel) => {
+    setActivePanel(panel);
+  }, []);
+  const closePanel = useCallback(() => {
+    setActivePanel(null);
+  }, []);
 
   // Listen for set-notes-folder event from CLI (scratch .)
   // Placed here in AppContent where both NotesContext and ThemeContext are available
@@ -258,7 +320,7 @@ function AppContent() {
         e.key.toLowerCase() === "m"
       ) {
         e.preventDefault();
-        window.dispatchEvent(new CustomEvent("toggle-source-mode"));
+        if (!activePanel || focusMode) window.dispatchEvent(new CustomEvent("toggle-source-mode"));
         return;
       }
 
@@ -277,6 +339,8 @@ function AppContent() {
       // Trap Tab/Shift+Tab in notes view only - prevent focus navigation
       // TipTap handles indentation internally before event bubbles up
       if (e.key === "Tab") {
+        // Journal panels and their navigation have their own accessible controls.
+        if (target.closest("[data-journal-navigation], [data-journal-panel], [data-journal-calendar]")) return;
         e.preventDefault();
         return;
       }
@@ -309,8 +373,10 @@ function AppContent() {
         e.key.toLowerCase() === "f"
       ) {
         e.preventDefault();
+        setFocusMode(false);
         setSidebarVisible(true);
-        window.dispatchEvent(new CustomEvent("open-sidebar-search"));
+        openPanel("search");
+        requestAnimationFrame(() => window.dispatchEvent(new Event("focus-journal-search")));
         return;
       }
 
@@ -328,9 +394,15 @@ function AppContent() {
         return;
       }
 
+      // Dashboard controls need normal Enter and arrow-key behavior.
+      if (target.closest("[data-journal-panel], [data-journal-navigation], [data-journal-calendar]")) return;
+
       // Delete current note (note list focused, or editor on empty note)
+      const isInJournalPanel = !!target.closest("[data-journal-panel]");
       if (
         selectedNoteId &&
+        !activePanel &&
+        !isInJournalPanel &&
         !isInInput &&
         (e.key === "Delete" ||
           (e.key === "Backspace" && (e.metaKey || e.ctrlKey))) &&
@@ -364,13 +436,15 @@ function AppContent() {
       }
 
       // Arrow keys for note navigation
-      // Skip if folder tree view is handling its own navigation
+      // Skip if folder tree view or journal entry list is handling its own navigation
       const isInFolderTree = !!(e.target as HTMLElement).closest("[data-folder-tree]");
+      const isInJournalList = !!(e.target as HTMLElement).closest(".journal-entry-list");
       if (
         displayItems.length > 0 &&
         (e.key === "ArrowDown" || e.key === "ArrowUp") &&
         ((!isInEditor && !isInInput) || isEditorEmpty) &&
-        !isInFolderTree
+        !isInFolderTree &&
+        !isInJournalList
       ) {
         e.preventDefault();
         const currentIndex = displayItems.findIndex(
@@ -392,7 +466,7 @@ function AppContent() {
       }
 
       // Enter to focus editor
-      if (e.key === "Enter" && selectedNoteId && !isInEditor && !isInInput) {
+      if (e.key === "Enter" && selectedNoteId && !activePanel && !isInJournalPanel && !isInEditor && !isInInput) {
         e.preventDefault();
         const editor = document.querySelector(".ProseMirror") as HTMLElement;
         if (editor) {
@@ -442,8 +516,10 @@ function AppContent() {
     toggleSidebar,
     toggleFocusMode,
     focusMode,
+    activePanel,
     view,
     setInterfaceZoom,
+    openPanel,
   ]);
 
   const handleClosePalette = useCallback(() => {
@@ -468,7 +544,7 @@ function AppContent() {
 
   return (
     <>
-      <div className="h-full min-h-0 flex bg-bg text-text overflow-hidden">
+      <div className="relative h-full min-h-0 flex bg-bg text-text overflow-hidden">
         {view === "settings" ? (
           <SettingsPage onBack={closeSettings} />
         ) : (
@@ -478,17 +554,25 @@ function AppContent() {
               style={{ width: (!sidebarVisible || focusMode) ? 0 : `var(--sidebar-width, ${SIDEBAR_DEFAULT_PX}px)` }}
               className={`relative transition-all duration-500 ease-out overflow-hidden ${!sidebarVisible || focusMode ? "opacity-0 -translate-x-4 pointer-events-none" : "opacity-100 translate-x-0"}`}
             >
-              <Sidebar onOpenSettings={toggleSettings} />
+              <Sidebar
+                onOpenSettings={toggleSettings}
+                activePanel={activePanel}
+                onTogglePanel={togglePanel}
+                onClosePanel={closePanel}
+              />
               {sidebarVisible && !focusMode && <SidebarResizeHandle />}
             </div>
-            <Editor
-              onToggleSidebar={toggleSidebar}
-              sidebarVisible={sidebarVisible}
-              focusMode={focusMode}
-              onEditorReady={(editor) => {
-                editorRef.current = editor;
-              }}
-            />
+            <div id="journal-insights-slot" data-journal-panel className="journal-workspace" style={{ display: activePanel && !focusMode ? "block" : "none" }} />
+            <div className="relative flex-1 min-w-0 h-full" style={{ display: activePanel && !focusMode ? "none" : "flex" }}>
+              <Editor
+                onToggleSidebar={toggleSidebar}
+                sidebarVisible={sidebarVisible}
+                focusMode={focusMode}
+                onEditorReady={(editor) => {
+                  editorRef.current = editor;
+                }}
+              />
+            </div>
           </>
         )}
       </div>
@@ -539,7 +623,7 @@ function AppContent() {
             ) : aiProvider === "opencode" ? (
               <OpenCodeIcon className="w-4.5 h-4.5 fill-text-muted animate-pulse-gentle" />
             ) : aiProvider === "ollama" ? (
-              <OllamaIcon className="w-4.5 h-4.5 fill-text-muted animate-bounce-gentle" />
+              <OllamaIcon className="w-4.5 h-4.5 fill-text-muted animate-float-subtle" />
             ) : (
               <ClaudeIcon className="w-4.5 h-4.5 fill-text-muted animate-spin-slow" />
             )}

@@ -23,7 +23,7 @@ import { Markdown } from "@tiptap/markdown";
 import CodeBlockLowlight from "@tiptap/extension-code-block-lowlight";
 import { lowlight } from "./lowlight";
 import { CodeBlockView } from "./CodeBlockView";
-import { Extension, InputRule } from "@tiptap/core";
+import { Extension, InputRule, mergeAttributes } from "@tiptap/core";
 import { Decoration, DecorationSet } from "@tiptap/pm/view";
 import {
   NodeSelection,
@@ -61,6 +61,16 @@ import { Menu, MenuItem, PredefinedMenuItem } from "@tauri-apps/api/menu";
 import { useOptionalNotes } from "../../context/NotesContext";
 import { useTheme } from "../../context/ThemeContext";
 import { Frontmatter } from "./Frontmatter";
+import { DreamMetadata } from "../journal/DreamMetadata";
+import { classifyJournalId } from "../../lib/journal";
+import {
+  assetSubfolderForNote,
+  formatImageSizeTitle,
+  parseImageSizeTitle,
+  relativeAssetPathForNote,
+  resolveNoteImageToAssetRelPath,
+  type ImageWidthPercent,
+} from "../../lib/attachments";
 import { BlockMathEditor } from "./BlockMathEditor";
 import { LinkEditor } from "./LinkEditor";
 import { SearchToolbar } from "./SearchToolbar";
@@ -246,6 +256,8 @@ interface FormatBarProps {
   onAddLink: () => void;
   onAddBlockMath: () => void;
   onAddImage: () => void;
+  onPickGooglePhoto?: () => void;
+  googlePhotosConnected?: boolean;
 }
 
 // FormatBar must re-render with parent to reflect editor.isActive() state changes
@@ -255,6 +267,8 @@ function FormatBar({
   onAddLink,
   onAddBlockMath,
   onAddImage,
+  onPickGooglePhoto,
+  googlePhotosConnected,
 }: FormatBarProps) {
   const [tableMenuOpen, setTableMenuOpen] = useState(false);
 
@@ -393,6 +407,28 @@ function FormatBar({
       <ToolbarButton onClick={onAddImage} isActive={false} title="Add Image">
         <ImageIcon className="w-4.5 h-4.5 stroke-[1.5]" />
       </ToolbarButton>
+      {googlePhotosConnected && onPickGooglePhoto && (
+        <ToolbarButton
+          onClick={onPickGooglePhoto}
+          isActive={false}
+          title="Insert from Google Photos"
+        >
+          <svg
+            viewBox="0 0 24 24"
+            fill="none"
+            stroke="currentColor"
+            className="w-4.5 h-4.5 stroke-[1.5]"
+            strokeLinecap="round"
+            strokeLinejoin="round"
+            aria-hidden="true"
+          >
+            <rect x="3" y="5" width="14" height="14" rx="2" />
+            <circle cx="8" cy="10" r="1.3" />
+            <path d="m17 15-3.5-3.5a1.5 1.5 0 0 0-2.1 0L6 17" />
+            <path d="M19 3v6M16 6h6" />
+          </svg>
+        </ToolbarButton>
+      )}
       <DropdownMenu.Root open={tableMenuOpen} onOpenChange={setTableMenuOpen}>
         <Tooltip content="Insert Table">
           <DropdownMenu.Trigger asChild>
@@ -568,6 +604,7 @@ export function Editor({
   const [sourceMode, setSourceMode] = useState(false);
   const [sourceContent, setSourceContent] = useState("");
   const sourceTimeoutRef = useRef<number | null>(null);
+  const pendingSourceRef = useRef<{ noteId: string; content: string } | null>(null);
   const sourceModeTransitionRef = useRef<{
     topBlockIndex: number;
     cursorBlockIndex: number;
@@ -590,6 +627,12 @@ export function Editor({
   const scrollContainerRef = useRef<HTMLDivElement>(null);
   const editorRef = useRef<TiptapEditor | null>(null);
   const currentNoteIdRef = useRef<string | null>(null);
+  const notesFolder = notesCtx?.notesFolder ?? null;
+  const notesFolderRef = useRef<string | null>(notesFolder);
+  notesFolderRef.current = notesFolder;
+  const settingsRef = useRef<Settings | null>(settings);
+  settingsRef.current = settings;
+  const [googlePhotosConnected, setGooglePhotosConnected] = useState(false);
   // Track if we need to save (use ref to avoid computing markdown on every keystroke)
   const needsSaveRef = useRef(false);
   // Stable refs for wikilink click handler (avoids re-registering listener on every notes change)
@@ -600,6 +643,69 @@ export function Editor({
 
   // Keep ref in sync with current note ID
   currentNoteIdRef.current = currentNote?.id ?? null;
+
+  const getAssetSubfolder = useCallback(() => {
+    const noteId = currentNoteIdRef.current;
+    const journal = settingsRef.current?.journal;
+    if (!noteId || previewMode || !journal?.enabled) return undefined;
+    return assetSubfolderForNote(noteId, journal.root);
+  }, [previewMode]);
+
+  const insertLocalAssetImage = useCallback(
+    async (relativePath: string, pos?: number) => {
+      const targetEditor = editorRef.current;
+      if (!targetEditor) return;
+      const noteId = currentNoteIdRef.current;
+      let src: string;
+      if (noteId && !previewMode) {
+        src = relativeAssetPathForNote(noteId, relativePath);
+      } else {
+        const folder = notesFolderRef.current || (await invoke<string>("get_notes_folder"));
+        const absolutePath = await join(folder, relativePath);
+        src = convertFileSrc(absolutePath);
+      }
+      if (typeof pos === "number") {
+        targetEditor
+          .chain()
+          .focus()
+          .insertContentAt(pos, { type: "image", attrs: { src } })
+          .run();
+      } else {
+        targetEditor.chain().focus().setImage({ src }).run();
+      }
+    },
+    [previewMode],
+  );
+
+  const saveBlobAndInsert = useCallback(
+    (blob: Blob, pos?: number, failureLabel = "Failed to paste image") => {
+      const reader = new FileReader();
+      reader.onload = async () => {
+        const base64 = String(reader.result || "").split(",")[1];
+        if (!base64) {
+          toast.error(failureLabel);
+          return;
+        }
+        try {
+          const subfolder = getAssetSubfolder();
+          const relativePath = await invoke<string>("save_clipboard_image", {
+            base64Data: base64,
+            subfolder: subfolder ?? null,
+          });
+          await insertLocalAssetImage(relativePath, pos);
+        } catch (error) {
+          console.error(failureLabel, error);
+          toast.error(failureLabel);
+        }
+      };
+      reader.onerror = () => {
+        console.error(failureLabel, reader.error);
+        toast.error(failureLabel);
+      };
+      reader.readAsDataURL(blob);
+    },
+    [getAssetSubfolder, insertLocalAssetImage],
+  );
 
   // Get markdown from editor
   const getMarkdown = useCallback(
@@ -618,21 +724,54 @@ export function Editor({
     [],
   );
 
-  // Load settings when note changes or notes are refreshed (e.g., after pin/unpin)
+  // Load settings when note changes, notes refresh, or journal settings change
   useEffect(() => {
-    if (currentNote?.id && !previewMode) {
+    if (previewMode) return;
+    const loadSettings = () => {
       notesService
         .getSettings()
         .then(setSettings)
         .catch((error) => {
           console.error("Failed to load settings:", error);
         });
+    };
+    if (currentNote?.id) {
+      loadSettings();
     }
+    window.addEventListener("journal-settings-changed", loadSettings);
+    return () => {
+      window.removeEventListener("journal-settings-changed", loadSettings);
+    };
   }, [currentNote?.id, notes, previewMode]);
+
+  useEffect(() => {
+    if (previewMode) return;
+    let cancelled = false;
+    const checkPhotos = () => {
+      invoke<{ connected: boolean }>("get_google_photos_status")
+        .then((status) => {
+          if (!cancelled) setGooglePhotosConnected(Boolean(status.connected));
+        })
+        .catch(() => {
+          if (!cancelled) setGooglePhotosConnected(false);
+        });
+    };
+    checkPhotos();
+    window.addEventListener("google-photos-changed", checkPhotos);
+    return () => {
+      cancelled = true;
+      window.removeEventListener("google-photos-changed", checkPhotos);
+    };
+  }, [previewMode]);
 
   // Calculate if current note is pinned
   const isPinned =
     settings?.pinnedNoteIds?.includes(currentNote?.id || "") || false;
+  const isDream =
+    !!currentNote &&
+    !previewMode &&
+    Boolean(settings?.journal?.enabled) &&
+    classifyJournalId(currentNote.id, settings?.journal?.root?.trim() || "Journal") === "dream";
 
   // Find all matches for search query (case-insensitive)
   const findMatches = useCallback(
@@ -1094,7 +1233,52 @@ export function Editor({
           ];
         },
       }),
-      Image.configure({
+      Image.extend({
+        addAttributes() {
+          return {
+            ...this.parent?.(),
+            src: {
+              default: null,
+              parseHTML: (element: HTMLElement) =>
+                element.getAttribute("data-relative-src") || element.getAttribute("src"),
+            },
+            title: {
+              default: null,
+              parseHTML: (element: HTMLElement) =>
+                element.getAttribute("data-raw-title") ?? element.getAttribute("title"),
+            },
+          };
+        },
+        renderHTML({ HTMLAttributes }) {
+          const rawSrc = String(HTMLAttributes.src || "");
+          let displaySrc = rawSrc;
+          const folder = notesFolderRef.current;
+          const noteId = currentNoteIdRef.current;
+          if (folder && noteId && !previewMode) {
+            const assetRel = resolveNoteImageToAssetRelPath(noteId, rawSrc);
+            if (assetRel) {
+              const sep = isWindows ? "\\" : "/";
+              const cleanFolder = folder.replace(/[\\/]+$/, "");
+              const fullPath = `${cleanFolder}${sep}${assetRel.replace(/\//g, sep)}`;
+              displaySrc = convertFileSrc(fullPath);
+            }
+          }
+          const rawTitle = HTMLAttributes.title as string | null | undefined;
+          const { widthPercent, caption } = parseImageSizeTitle(rawTitle);
+          const extra: Record<string, unknown> = {
+            src: displaySrc,
+            "data-relative-src": rawSrc,
+          };
+          if (rawTitle) {
+            extra["data-raw-title"] = rawTitle;
+            extra.title = caption || null;
+          }
+          if (widthPercent && widthPercent < 100) {
+            extra.style = `width: ${widthPercent}%; max-width: 100%; height: auto;`;
+          }
+          return ["img", mergeAttributes(this.options.HTMLAttributes, HTMLAttributes, extra)];
+        },
+      }).configure({
         inline: false,
         allowBase64: false,
       }),
@@ -1179,41 +1363,7 @@ export function Editor({
         if (imageItem) {
           const blob = imageItem.getAsFile();
           if (blob) {
-            // Convert blob to base64 and handle async operations
-            const reader = new FileReader();
-            reader.onload = async () => {
-              const base64 = (reader.result as string).split(",")[1]; // Remove data:image/...;base64, prefix
-
-              try {
-                // Save clipboard image
-                const relativePath = await invoke<string>(
-                  "save_clipboard_image",
-                  { base64Data: base64 },
-                );
-
-                // Get notes folder and construct absolute path using Tauri's join
-                const notesFolder = await invoke<string>("get_notes_folder");
-                const absolutePath = await join(notesFolder, relativePath);
-
-                // Convert to Tauri asset URL
-                const assetUrl = convertFileSrc(absolutePath);
-
-                // Insert image
-                editorRef.current
-                  ?.chain()
-                  .focus()
-                  .setImage({ src: assetUrl })
-                  .run();
-              } catch (error) {
-                console.error("Failed to paste image:", error);
-                toast.error("Failed to paste image");
-              }
-            };
-            reader.onerror = () => {
-              console.error("Failed to read clipboard image:", reader.error);
-              toast.error("Failed to read clipboard image");
-            };
-            reader.readAsDataURL(blob);
+            saveBlobAndInsert(blob, undefined, "Failed to paste image");
             return true; // Handled
           }
         }
@@ -1248,6 +1398,27 @@ export function Editor({
         }
 
         return false;
+      },
+      // Handle dragged & dropped image files
+      handleDrop: (view, event, _slice, moved) => {
+        if (moved) return false;
+        const files = Array.from(event.dataTransfer?.files || []);
+        const imageFiles = files.filter(
+          (file) =>
+            file.type.startsWith("image/") ||
+            /\.(png|jpe?g|gif|webp|bmp)$/i.test(file.name),
+        );
+        if (imageFiles.length === 0) return false;
+
+        event.preventDefault();
+        const coords = view.posAtCoords({
+          left: event.clientX,
+          top: event.clientY,
+        });
+        for (const file of imageFiles) {
+          saveBlobAndInsert(file, coords?.pos, "Failed to insert dropped image");
+        }
+        return true;
       },
     },
     onCreate: ({ editor: editorInstance }) => {
@@ -1476,6 +1647,9 @@ export function Editor({
         clearTimeout(sourceTimeoutRef.current);
         sourceTimeoutRef.current = null;
       }
+      const pending = pendingSourceRef.current;
+      pendingSourceRef.current = null;
+      if (pending) void saveNote(pending.content, pending.noteId);
     }
     // Check if this is a manual reload (user clicked Refresh button or pressed Cmd+R)
     const isManualReload = reloadVersion !== lastReloadVersionRef.current;
@@ -1585,6 +1759,10 @@ export function Editor({
       if (saveTimeoutRef.current) {
         clearTimeout(saveTimeoutRef.current);
       }
+      if (sourceTimeoutRef.current) clearTimeout(sourceTimeoutRef.current);
+      const pending = pendingSourceRef.current;
+      pendingSourceRef.current = null;
+      if (pending) void saveNote(pending.content, pending.noteId);
       // Flush any pending save before unmounting
       if (needsSaveRef.current && editorRef.current) {
         needsSaveRef.current = false;
@@ -1593,7 +1771,7 @@ export function Editor({
           ? manager.serialize(editorRef.current.getJSON())
           : editorRef.current.getText();
         // Fire and forget - save will complete in background
-        saveNote(markdown);
+        if (loadedNoteIdRef.current) void saveNote(markdown, loadedNoteIdRef.current);
       }
       if (linkPopupRef.current) {
         linkPopupRef.current.destroy();
@@ -1746,25 +1924,37 @@ export function Editor({
     });
     if (selected) {
       try {
-        // Copy image to assets folder and get relative path (assets/filename.ext)
+        const subfolder = getAssetSubfolder();
         const relativePath = await invoke<string>("copy_image_to_assets", {
           sourcePath: selected as string,
+          subfolder: subfolder ?? null,
         });
-
-        // Get notes folder and construct absolute path using Tauri's join
-        const notesFolder = await invoke<string>("get_notes_folder");
-        const absolutePath = await join(notesFolder, relativePath);
-
-        // Convert to Tauri asset URL
-        const assetUrl = convertFileSrc(absolutePath);
-
-        // Insert image with asset URL
-        editor.chain().focus().setImage({ src: assetUrl }).run();
+        await insertLocalAssetImage(relativePath);
       } catch (error) {
         console.error("Failed to add image:", error);
+        toast.error(String(error));
       }
     }
-  }, [editor]);
+  }, [editor, getAssetSubfolder, insertLocalAssetImage]);
+
+  const handlePickGooglePhoto = useCallback(async () => {
+    if (!editor) return;
+    if (!googlePhotosConnected) {
+      toast("Connect Google Photos in Settings → Journal first.");
+      return;
+    }
+    const toastId = toast.loading("Waiting for Google Photos Picker in browser…");
+    try {
+      const subfolder = getAssetSubfolder();
+      const relativePath = await invoke<string>("pick_google_photo", {
+        subfolder: subfolder ?? null,
+      });
+      await insertLocalAssetImage(relativePath);
+      toast.success("Photo added from Google Photos", { id: toastId });
+    } catch (error) {
+      toast.error(String(error), { id: toastId });
+    }
+  }, [editor, googlePhotosConnected, getAssetSubfolder, insertLocalAssetImage]);
 
   // Listen for slash command image insertion
   useEffect(() => {
@@ -1772,6 +1962,15 @@ export function Editor({
     window.addEventListener("slash-command-image", handler);
     return () => window.removeEventListener("slash-command-image", handler);
   }, [handleAddImage]);
+
+  useEffect(() => {
+    const handler = () => {
+      void handlePickGooglePhoto();
+    };
+    window.addEventListener("slash-command-google-photos", handler);
+    return () =>
+      window.removeEventListener("slash-command-google-photos", handler);
+  }, [handlePickGooglePhoto]);
 
   // Listen for slash command block math insertion
   useEffect(() => {
@@ -1958,6 +2157,7 @@ export function Editor({
     const container = scrollContainerRef.current;
 
     if (!sourceMode) {
+      void flushPendingSave();
       // === Entering source mode (TipTap → textarea) ===
       const md = getMarkdown(editor);
 
@@ -1997,6 +2197,11 @@ export function Editor({
       setSourceContent(md);
       setSourceMode(true);
     } else {
+      if (sourceTimeoutRef.current) clearTimeout(sourceTimeoutRef.current);
+      sourceTimeoutRef.current = null;
+      const pending = pendingSourceRef.current;
+      pendingSourceRef.current = null;
+      if (pending) void saveNote(pending.content, pending.noteId);
       // === Exiting source mode (textarea → TipTap) ===
       const textarea = container?.querySelector(
         "textarea",
@@ -2037,7 +2242,7 @@ export function Editor({
       }
       setSourceMode(false);
     }
-  }, [editor, sourceMode, sourceContent, getMarkdown]);
+  }, [editor, sourceMode, sourceContent, getMarkdown, flushPendingSave, saveNote]);
 
   // Restore focus and scroll position after source mode transitions.
   // useLayoutEffect runs synchronously after React commits DOM changes,
@@ -2124,8 +2329,11 @@ export function Editor({
       if (sourceTimeoutRef.current) {
         clearTimeout(sourceTimeoutRef.current);
       }
+      if (currentNote) pendingSourceRef.current = { noteId: currentNote.id, content: value };
       sourceTimeoutRef.current = window.setTimeout(async () => {
         if (currentNote) {
+          pendingSourceRef.current = null;
+          sourceTimeoutRef.current = null;
           setIsSaving(true);
           try {
             lastSaveRef.current = { noteId: currentNote.id, content: value };
@@ -2232,7 +2440,7 @@ export function Editor({
   }
 
   return (
-    <div className="flex-1 flex flex-col bg-bg overflow-hidden">
+    <div className={`flex-1 flex flex-col bg-bg overflow-hidden ${isDream && !sourceMode ? "journal-dream-editor" : ""}`}>
       {/* Drag region with sidebar toggle, date and save status */}
       <div
         className={cn(
@@ -2441,8 +2649,12 @@ export function Editor({
           onAddLink={handleAddLink}
           onAddBlockMath={handleAddBlockMath}
           onAddImage={handleAddImage}
+          onPickGooglePhoto={handlePickGooglePhoto}
+          googlePhotosConnected={googlePhotosConnected}
         />
       </div>
+
+      {isDream && !focusMode && !sourceMode && <DreamMetadata editor={editor} noteId={currentNote.id} />}
 
       {/* Editor content area with resize handles overlay */}
       <div data-editor-content-area className="flex-1 relative overflow-hidden">
@@ -2525,6 +2737,104 @@ export function Editor({
                   });
 
                   if (!clickPos) return;
+
+                  const targetEl = e.target as HTMLElement | null;
+                  if (targetEl?.closest("img")) {
+                    const doc = editor.state.doc;
+                    let imagePos: number | null = null;
+                    for (const candidate of [
+                      clickPos.pos,
+                      Math.max(0, clickPos.pos - 1),
+                      clickPos.inside,
+                    ]) {
+                      if (candidate < 0 || candidate >= doc.content.size) continue;
+                      if (doc.nodeAt(candidate)?.type.name === "image") {
+                        imagePos = candidate;
+                        break;
+                      }
+                    }
+                    if (imagePos !== null) {
+                      e.preventDefault();
+                      try {
+                        editor.chain().focus().setNodeSelection(imagePos).run();
+                        const imgNode = editor.state.doc.nodeAt(imagePos);
+                        const currentSrc = String(imgNode?.attrs?.src || "");
+                        const currentTitle =
+                          (imgNode?.attrs?.title as string | null | undefined) ?? null;
+                        const { widthPercent } = parseImageSizeTitle(currentTitle);
+                        const setWidth = (pct: ImageWidthPercent) => {
+                          const nextTitle = formatImageSizeTitle(pct, currentTitle);
+                          editor
+                            .chain()
+                            .focus()
+                            .setNodeSelection(imagePos!)
+                            .updateAttributes("image", { title: nextTitle ?? null })
+                            .run();
+                        };
+                        const relAsset =
+                          !previewMode && currentNoteIdRef.current
+                            ? resolveNoteImageToAssetRelPath(
+                                currentNoteIdRef.current,
+                                currentSrc,
+                              )
+                            : null;
+                        const folderForShow =
+                          notesFolderRef.current ||
+                          (relAsset
+                            ? await invoke<string>("get_notes_folder").catch(() => null)
+                            : null);
+
+                        const imageMenuItems = [
+                          await MenuItem.new({
+                            text: `${widthPercent === 50 ? "✓ " : ""}Size: Small (50%)`,
+                            action: () => setWidth(50),
+                          }),
+                          await MenuItem.new({
+                            text: `${widthPercent === 75 ? "✓ " : ""}Size: Medium (75%)`,
+                            action: () => setWidth(75),
+                          }),
+                          await MenuItem.new({
+                            text: `${!widthPercent || widthPercent === 100 ? "✓ " : ""}Size: Full (100%)`,
+                            action: () => setWidth(100),
+                          }),
+                          await PredefinedMenuItem.new({ item: "Separator" }),
+                          ...(relAsset && folderForShow
+                            ? [
+                                await MenuItem.new({
+                                  text: "Show in Folder",
+                                  action: async () => {
+                                    const parentRel = relAsset.includes("/")
+                                      ? relAsset.slice(0, relAsset.lastIndexOf("/"))
+                                      : "";
+                                    const targetDir = parentRel
+                                      ? await join(folderForShow, parentRel)
+                                      : folderForShow;
+                                    await invoke("open_in_file_manager", {
+                                      path: targetDir,
+                                    });
+                                  },
+                                }),
+                              ]
+                            : []),
+                          await MenuItem.new({
+                            text: "Remove Image",
+                            action: () =>
+                              editor
+                                .chain()
+                                .focus()
+                                .setNodeSelection(imagePos!)
+                                .deleteSelection()
+                                .run(),
+                          }),
+                        ];
+                        const imageMenu = await Menu.new({ items: imageMenuItems });
+                        await imageMenu.popup();
+                      } catch (err) {
+                        console.error("Image context menu error:", err);
+                      }
+                      return;
+                    }
+                  }
 
                   // Set the selection to the clicked position
                   editor.chain().focus().setTextSelection(clickPos.pos).run();

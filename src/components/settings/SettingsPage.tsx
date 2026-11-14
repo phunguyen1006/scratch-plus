@@ -13,13 +13,14 @@ import { AppearanceSettingsSection } from "./EditorSettingsSection";
 import { ShortcutsSettingsSection } from "./ShortcutsSettingsSection";
 import { AboutSettingsSection } from "./AboutSettingsSection";
 import { ToolsSettingsSection } from "./ToolsSettingsSection";
+import { JournalSettingsSection } from "./JournalSettingsSection";
 import { mod, isMac, isWindows } from "../../lib/platform";
 
 interface SettingsPageProps {
   onBack: () => void;
 }
 
-type SettingsTab = "general" | "tools" | "editor" | "shortcuts" | "about";
+type SettingsTab = "general" | "tools" | "editor" | "shortcuts" | "about" | "journal";
 
 const tabs: {
   id: SettingsTab;
@@ -32,6 +33,7 @@ const tabs: {
   { id: "editor", label: "Appearance", icon: SwatchIcon, shortcut: "3" },
   { id: "shortcuts", label: "Shortcuts", icon: KeyboardIcon, shortcut: "4" },
   { id: "about", label: "About", icon: InfoIcon, shortcut: "5" },
+  { id: "journal", label: "Journal", icon: FolderIcon, shortcut: "6" },
 ];
 
 export function SettingsPage({ onBack }: SettingsPageProps) {
@@ -64,6 +66,9 @@ export function SettingsPage({ onBack }: SettingsPageProps) {
         } else if (e.key === "5") {
           e.preventDefault();
           setActiveTab("about");
+        } else if (e.key === "6") {
+          e.preventDefault();
+          setActiveTab("journal");
         }
       }
     };
@@ -135,6 +140,7 @@ export function SettingsPage({ onBack }: SettingsPageProps) {
             {activeTab === "editor" && <AppearanceSettingsSection />}
             {activeTab === "shortcuts" && <ShortcutsSettingsSection />}
             {activeTab === "about" && <AboutSettingsSection />}
+            {activeTab === "journal" && <JournalSettingsSection />}
           </div>
         </div>
       </div>

@@ -1,0 +1,6 @@
+{
+  "productName": "Scratch Plus UI Test",
+  "identifier": "com.phunguyen.scratchplus.uitest",
+  "bundle": { "createUpdaterArtifacts": false },
+  "plugins": { "updater": { "endpoints": [] } }
+}

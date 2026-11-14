@@ -32,3 +32,11 @@ src-tauri/gen/
 
 # Release artifacts
 latest.json
+
+# Reproducible sample journal; regenerate with npm run demo:journal.
+/examples/journal-demo/
+/examples/journal-demo-dreams/
+
+# Private imported journal data
+/scratch daily diary/
+/scratch daily diary clean/

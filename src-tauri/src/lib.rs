@@ -17,6 +17,7 @@ use tokio::fs;
 use tokio::io::AsyncWriteExt;
 
 mod git;
+mod photos;
 
 // Note metadata for list display
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -96,6 +97,25 @@ pub enum TextDirection {
     Rtl,
 }
 
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+#[serde(rename_all = "camelCase")]
+pub struct JournalSettings {
+    #[serde(default)]
+    pub enabled: bool,
+    #[serde(default)]
+    pub root: String,
+    #[serde(default)]
+    pub open_today: bool,
+    #[serde(default)]
+    pub show_calendar: bool,
+    #[serde(default)]
+    pub show_metrics: bool,
+    #[serde(default)]
+    pub show_memories: bool,
+    #[serde(default)]
+    pub show_heatmap: bool,
+}
+
 // App config (stored in app data directory - just the notes folder path)
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
 pub struct AppConfig {
@@ -106,6 +126,7 @@ pub struct AppConfig {
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
 pub struct Settings {
     pub theme: ThemeSettings,
+    pub journal: Option<JournalSettings>,
     #[serde(rename = "editorFont")]
     pub editor_font: Option<EditorFontSettings>,
     #[serde(rename = "gitEnabled")]
@@ -1025,6 +1046,120 @@ async fn read_note(id: String, state: State<'_, AppState>) -> Result<Note, Strin
     })
 }
 
+/// Create a dated entry without overwriting an existing note. The journal root is
+/// deliberately a direct child of the notes folder so the existing watcher,
+/// search and editor continue to use exactly the same files.
+#[tauri::command]
+async fn create_journal_entry(date: String, state: State<'_, AppState>) -> Result<String, String> {
+    let parsed = chrono::NaiveDate::parse_from_str(&date, "%Y-%m-%d")
+        .map_err(|_| "Invalid journal date".to_string())?;
+    if date.len() != 10 || parsed.format("%Y-%m-%d").to_string() != date {
+        return Err("Invalid journal date".to_string());
+    }
+    let folder = state.app_config.read().expect("app_config read lock").notes_folder.clone()
+        .ok_or("Notes folder not set")?;
+    let (journal, ignored_dirs) = {
+        let settings = state.settings.read().expect("settings read lock");
+        (settings.journal.clone().ok_or("Journal is not configured")?, get_effective_ignored_dirs(&settings))
+    };
+    if !journal.enabled { return Err("Journal mode is disabled".to_string()); }
+    let root_name = journal.root.trim().to_string();
+    validate_folder_path(&root_name)?;
+    if root_name.contains('/') || ignored_dirs.iter().any(|name| name == &root_name) {
+        return Err("Choose one visible folder name inside the notes folder".to_string());
+    }
+    tokio::task::spawn_blocking(move || -> Result<String, String> {
+        use std::io::Write;
+        let notes_root = PathBuf::from(folder);
+        let canonical_notes = std::fs::canonicalize(&notes_root).map_err(|e| e.to_string())?;
+        let root = notes_root.join(&root_name);
+        std::fs::create_dir_all(&root).map_err(|e| e.to_string())?;
+        let canonical_root = std::fs::canonicalize(&root).map_err(|e| e.to_string())?;
+        if !canonical_root.starts_with(&canonical_notes) {
+            return Err("Journal folder cannot point outside the notes folder".to_string());
+        }
+        let mut matches = Vec::new();
+        for item in walkdir::WalkDir::new(&root).max_depth(9).into_iter()
+            .filter_entry(|e| e.depth() == 0 || (e.path() != root.join("Dreams") && is_visible_notes_entry(e, &ignored_dirs))) {
+            let item = item.map_err(|e| format!("Cannot scan journal: {}", e))?;
+            if item.file_type().is_file() && item.file_name() == std::ffi::OsStr::new(&format!("{}.md", date)) {
+                if let Some(id) = id_from_abs_path(&notes_root, item.path(), &ignored_dirs) { matches.push(id); }
+            }
+        }
+        if matches.len() > 1 { return Err("Multiple journal entries exist for this date; open one from Notes".to_string()); }
+        if let Some(id) = matches.pop() { return Ok(id); }
+        let year_dir = root.join(&date[..4]);
+        std::fs::create_dir_all(&year_dir).map_err(|e| e.to_string())?;
+        let canonical_year = std::fs::canonicalize(&year_dir).map_err(|e| e.to_string())?;
+        if !canonical_year.starts_with(&canonical_root) {
+            return Err("Journal year folder cannot point outside the journal".to_string());
+        }
+        let id = format!("{}/{}/{}", root_name, &date[..4], date);
+        let path = abs_path_from_id(&notes_root, &id)?;
+        let mut file = match std::fs::OpenOptions::new().write(true).create_new(true).open(path) {
+            Ok(file) => file,
+            Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => return Ok(id),
+            Err(e) => return Err(e.to_string()),
+        };
+        file.write_all(format!("# {}\n\n", date).as_bytes()).map_err(|e| e.to_string())?;
+        Ok(id)
+    }).await.map_err(|e| e.to_string())?
+}
+
+/// Each dream has an independent, collision-safe filename and an editable date.
+#[tauri::command]
+async fn create_dream_entry(date: String, state: State<'_, AppState>) -> Result<String, String> {
+    let parsed = chrono::NaiveDate::parse_from_str(&date, "%Y-%m-%d")
+        .map_err(|_| "Invalid dream date".to_string())?;
+    if date.len() != 10 || parsed.format("%Y-%m-%d").to_string() != date {
+        return Err("Invalid dream date".to_string());
+    }
+    let folder = state.app_config.read().expect("app_config read lock").notes_folder.clone()
+        .ok_or("Notes folder not set")?;
+    let (journal, ignored_dirs) = {
+        let settings = state.settings.read().expect("settings read lock");
+        (settings.journal.clone().ok_or("Journal is not configured")?, get_effective_ignored_dirs(&settings))
+    };
+    if !journal.enabled { return Err("Journal mode is disabled".to_string()); }
+    let root_name = journal.root.trim().to_string();
+    validate_folder_path(&root_name)?;
+    if root_name.contains('/') || ignored_dirs.iter().any(|name| name == &root_name || name == "Dreams") {
+        return Err("Choose a visible journal folder inside the notes folder".to_string());
+    }
+    tokio::task::spawn_blocking(move || -> Result<String, String> {
+        use std::io::Write;
+        let notes_root = PathBuf::from(folder);
+        let canonical_notes = std::fs::canonicalize(&notes_root).map_err(|e| e.to_string())?;
+        let root = notes_root.join(&root_name);
+        std::fs::create_dir_all(&root).map_err(|e| e.to_string())?;
+        let canonical_root = std::fs::canonicalize(&root).map_err(|e| e.to_string())?;
+        if !canonical_root.starts_with(&canonical_notes) { return Err("Journal folder cannot point outside the notes folder".to_string()); }
+        let dreams = root.join("Dreams");
+        std::fs::create_dir_all(&dreams).map_err(|e| e.to_string())?;
+        let canonical_dreams = std::fs::canonicalize(&dreams).map_err(|e| e.to_string())?;
+        if !canonical_dreams.starts_with(&canonical_root) { return Err("Dream folder cannot point outside the journal".to_string()); }
+        let year_dir = dreams.join(&date[..4]);
+        std::fs::create_dir_all(&year_dir).map_err(|e| e.to_string())?;
+        if !std::fs::canonicalize(&year_dir).map_err(|e| e.to_string())?.starts_with(&canonical_dreams) {
+            return Err("Dream year folder cannot point outside the journal".to_string());
+        }
+        let now = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map_err(|e| e.to_string())?.as_nanos();
+        for counter in 0..1000 {
+            let id = format!("{}/Dreams/{}/{}_{}_{}", root_name, &date[..4], date, now, counter);
+            let path = abs_path_from_id(&notes_root, &id)?;
+            match std::fs::OpenOptions::new().write(true).create_new(true).open(path) {
+                Ok(mut file) => {
+                    file.write_all(format!("---\ntype: dream\ndream_date: {}\n---\n\n# Untitled dream\n\n", date).as_bytes()).map_err(|e| e.to_string())?;
+                    return Ok(id);
+                }
+                Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => continue,
+                Err(e) => return Err(e.to_string()),
+            }
+        }
+        Err("Could not find an unused dream filename".to_string())
+    }).await.map_err(|e| e.to_string())?
+}
+
 #[tauri::command]
 async fn save_note(
     id: Option<String>,
@@ -1043,6 +1178,19 @@ async fn save_note(
     let title = extract_title(&content);
     let sanitized_leaf = sanitize_filename(&title);
 
+    // Dated journal filenames are stable even when the user edits the title.
+    let journal_id = id.as_ref().is_some_and(|existing_id| {
+        let settings = state.settings.read().expect("settings read lock");
+        settings.journal.as_ref().is_some_and(|journal| {
+            let root = journal.root.trim();
+            !root.is_empty() && (existing_id.starts_with(&format!("{}/Dreams/", root)) || (existing_id.starts_with(&format!("{}/", root)) &&
+                existing_id.rsplit('/').next().is_some_and(|leaf| {
+                    leaf.len() == 10 && chrono::NaiveDate::parse_from_str(leaf, "%Y-%m-%d")
+                        .map(|date| date.format("%Y-%m-%d").to_string() == leaf).unwrap_or(false)
+                })))
+        })
+    });
+
     // Determine the file ID and path, handling renames
     let (final_id, file_path, old_id) = if let Some(existing_id) = id {
         // Preserve directory prefix for notes in subfolders
@@ -1055,7 +1203,10 @@ async fn save_note(
 
         let old_file_path = abs_path_from_id(&folder_path, &existing_id)?;
 
-        if existing_id != desired_id {
+        if journal_id {
+            if !old_file_path.is_file() { return Err("Journal entry is missing; save was not written".to_string()); }
+            (existing_id, old_file_path, None)
+        } else if existing_id != desired_id {
             let mut new_id = desired_id.clone();
             let mut counter = 1;
 
@@ -2283,6 +2434,7 @@ fn copy_to_clipboard(app: AppHandle, text: String) -> Result<(), String> {
 #[tauri::command]
 async fn save_clipboard_image(
     base64_data: String,
+    subfolder: Option<String>,
     state: State<'_, AppState>,
 ) -> Result<String, String> {
     // Guard against empty clipboard payload
@@ -2308,8 +2460,11 @@ async fn save_clipboard_image(
         return Err("Decoded image data is empty".to_string());
     }
 
-    // Create assets folder path
-    let assets_dir = PathBuf::from(&folder).join("assets");
+    let detected_ext = photos::detect_image_extension(&image_data)
+        .ok_or_else(|| "Unsupported image format in clipboard".to_string())?;
+
+    // Create assets folder path (optionally grouped by YYYY-MM subfolder)
+    let (assets_dir, prefix) = photos::resolve_assets_dir_and_prefix(&folder, subfolder.as_deref())?;
     fs::create_dir_all(&assets_dir)
         .await
         .map_err(|e| e.to_string())?;
@@ -2320,12 +2475,12 @@ async fn save_clipboard_image(
         .map(|d| d.as_secs())
         .unwrap_or(0);
 
-    let mut target_name = format!("screenshot-{}.png", timestamp);
+    let mut target_name = format!("screenshot-{}.{}", timestamp, detected_ext);
     let mut counter = 1;
     let mut target_path = assets_dir.join(&target_name);
 
     while target_path.exists() {
-        target_name = format!("screenshot-{}-{}.png", timestamp, counter);
+        target_name = format!("screenshot-{}-{}.{}", timestamp, counter, detected_ext);
         target_path = assets_dir.join(&target_name);
         counter += 1;
     }
@@ -2336,12 +2491,36 @@ async fn save_clipboard_image(
         .map_err(|_| "Failed to write image".to_string())?;
 
     // Return relative path
-    Ok(format!("assets/{}", target_name))
+    Ok(format!("{}/{}", prefix, target_name))
+}
+
+fn has_valid_image_signature(bytes: &[u8], ext_lower: &str) -> bool {
+    if photos::detect_image_extension(bytes).is_some() {
+        return true;
+    }
+    match ext_lower {
+        "svg" => {
+            let head = String::from_utf8_lossy(&bytes[..bytes.len().min(512)]).to_lowercase();
+            head.contains("<svg")
+        }
+        "tiff" | "tif" => {
+            bytes.len() >= 4
+                && (&bytes[0..4] == b"II*\x00" || &bytes[0..4] == b"MM\x00*")
+        }
+        "ico" => bytes.len() >= 4 && &bytes[0..4] == b"\x00\x00\x01\x00",
+        "avif" => {
+            bytes.len() >= 12
+                && &bytes[4..8] == b"ftyp"
+                && (&bytes[8..12] == b"avif" || &bytes[8..12] == b"avis")
+        }
+        _ => false,
+    }
 }
 
 #[tauri::command]
 async fn copy_image_to_assets(
     source_path: String,
+    subfolder: Option<String>,
     state: State<'_, AppState>,
 ) -> Result<String, String> {
     let folder = {
@@ -2371,6 +2550,13 @@ async fn copy_image_to_assets(
         return Err("Only image files can be copied to assets".to_string());
     }
 
+    let source_bytes = fs::read(&source)
+        .await
+        .map_err(|_| "Failed to read source image".to_string())?;
+    if source_bytes.is_empty() || !has_valid_image_signature(&source_bytes, &ext_lower) {
+        return Err("File content does not match a supported image format".to_string());
+    }
+
     // Get original filename (without extension)
     let original_name = source
         .file_stem()
@@ -2380,8 +2566,8 @@ async fn copy_image_to_assets(
     // Sanitize the filename
     let sanitized_name = sanitize_filename(original_name);
 
-    // Create assets folder path
-    let assets_dir = PathBuf::from(&folder).join("assets");
+    // Create assets folder path (optionally grouped by YYYY-MM subfolder)
+    let (assets_dir, prefix) = photos::resolve_assets_dir_and_prefix(&folder, subfolder.as_deref())?;
     fs::create_dir_all(&assets_dir)
         .await
         .map_err(|e| e.to_string())?;
@@ -2397,13 +2583,13 @@ async fn copy_image_to_assets(
         counter += 1;
     }
 
-    // Copy the file
-    fs::copy(&source, &target_path)
+    // Write the verified bytes
+    fs::write(&target_path, &source_bytes)
         .await
         .map_err(|_| "Failed to copy image".to_string())?;
 
-    // Return both relative path and filename for frontend to construct the URL
-    Ok(format!("assets/{}", target_name))
+    // Return relative path for frontend to construct portable Markdown & asset URLs
+    Ok(format!("{}/{}", prefix, target_name))
 }
 
 #[tauri::command]
@@ -3845,6 +4031,8 @@ pub fn run() {
             save_note,
             delete_note,
             create_note,
+            create_journal_entry,
+            create_dream_entry,
             list_folders,
             create_folder,
             delete_folder,
@@ -3893,6 +4081,11 @@ pub fn run() {
             uninstall_cli,
             get_cli_status,
             set_title_bar_theme,
+            photos::get_google_photos_status,
+            photos::set_google_photos_client_id,
+            photos::connect_google_photos,
+            photos::disconnect_google_photos,
+            photos::pick_google_photo,
         ])
         .build(tauri::generate_context!())
         .expect("error while building tauri application");

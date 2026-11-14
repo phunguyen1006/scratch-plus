@@ -5,6 +5,18 @@ interface IconProps {
   className?: string;
 }
 
+export function HomeIcon({ className = "w-4.5 h-4.5" }: IconProps) {
+  return <svg className={className} fill="none" stroke="currentColor" viewBox="0 0 24 24" strokeWidth={1.7} strokeLinecap="round" strokeLinejoin="round"><path d="m3 10 9-7 9 7" /><path d="M5 9v11h14V9" /><path d="M9 20v-6h6v6" /></svg>;
+}
+
+export function InsightsIcon({ className = "w-4.5 h-4.5" }: IconProps) {
+  return <svg className={className} fill="none" stroke="currentColor" viewBox="0 0 24 24" strokeWidth={1.7} strokeLinecap="round" strokeLinejoin="round"><path d="M4 20v-6M10 20V5M16 20V9M22 20H2" /></svg>;
+}
+
+export function HistoryIcon({ className = "w-4.5 h-4.5" }: IconProps) {
+  return <svg className={className} fill="none" stroke="currentColor" viewBox="0 0 24 24" strokeWidth={1.7} strokeLinecap="round" strokeLinejoin="round"><path d="M3 12a9 9 0 1 0 3-6.7L3 8" /><path d="M3 3v5h5M12 7v5l3 2" /></svg>;
+}
+
 export function PilcrowIcon({ className = "w-4.5 h-4.5" }: IconProps) {
   return (
     <svg

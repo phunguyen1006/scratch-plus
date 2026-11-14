@@ -53,24 +53,24 @@ const defaultEditorFontSettings: Required<EditorFontSettings> = {
 const defaultThemeColors: Record<"light" | "dark", Record<ThemeColorKey, string>> = {
   light: {
     bg: "#ffffff",
-    "bg-secondary": "#fafaf9",
-    "bg-muted": "rgba(28, 25, 23, 0.06)",
-    "bg-emphasis": "rgba(28, 25, 23, 0.09)",
-    text: "#1c1917",
-    "text-muted": "#78716c",
-    border: "rgba(28, 25, 23, 0.08)",
-    accent: "#1c1917",
+    "bg-secondary": "#f8f8f7",
+    "bg-muted": "rgba(17, 17, 16, 0.045)",
+    "bg-emphasis": "rgba(17, 17, 16, 0.085)",
+    text: "#111110",
+    "text-muted": "#666662",
+    border: "rgba(17, 17, 16, 0.11)",
+    accent: "#111110",
     selection: "rgba(250, 204, 21, 0.4)",
   },
   dark: {
-    bg: "rgb(22, 20, 19)",
-    "bg-secondary": "rgb(14, 12, 11)",
-    "bg-muted": "rgba(250, 249, 249, 0.05)",
-    "bg-emphasis": "rgba(250, 249, 249, 0.08)",
-    text: "#fafaf9",
-    "text-muted": "#a8a29e",
-    border: "rgba(250, 249, 249, 0.07)",
-    accent: "#fafaf9",
+    bg: "#0c0c0b",
+    "bg-secondary": "#141413",
+    "bg-muted": "rgba(255, 255, 255, 0.05)",
+    "bg-emphasis": "rgba(255, 255, 255, 0.095)",
+    text: "#f5f5f3",
+    "text-muted": "#9a9a95",
+    border: "rgba(255, 255, 255, 0.10)",
+    accent: "#f5f5f3",
     selection: "rgba(253, 224, 71, 0.35)",
   },
 };
@@ -519,8 +519,12 @@ export function ThemeProvider({ children }: ThemeProviderProps) {
       "text", "text-muted", "border", "accent", "selection",
     ];
     for (const key of keys) {
-      const value = activeColors[key] ?? defaults[key];
-      root.style.setProperty(`--color-${key}`, value);
+      const value = activeColors[key];
+      if (value !== undefined) {
+        root.style.setProperty(`--color-${key}`, value);
+      } else {
+        root.style.removeProperty(`--color-${key}`);
+      }
     }
 
     // Sync the Windows title bar to match bg-secondary (no-op on other OSes).

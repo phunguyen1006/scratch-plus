@@ -6,6 +6,7 @@
   "scripts": {
     "dev": "vite",
     "build": "tsc && vite build",
+    "demo:journal": "node scripts/create-journal-demo.mjs",
     "preview": "vite preview",
     "tauri": "tauri"
   },

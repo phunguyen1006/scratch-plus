@@ -163,6 +163,16 @@ const SLASH_COMMANDS: SlashCommandItem[] = [
     },
   },
   {
+    title: "Google Photos",
+    description: "Pick an image from Google Photos",
+    icon: <ImageIcon />,
+    aliases: ["gphotos", "photos", "google"],
+    command: (editor) => {
+      editor.chain().focus().run();
+      window.dispatchEvent(new CustomEvent("slash-command-google-photos"));
+    },
+  },
+  {
     title: "Table",
     description: "Insert a 3×3 table",
     icon: <TableIcon />,

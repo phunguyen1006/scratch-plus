@@ -408,6 +408,66 @@ export function CommandPalette({
       }
     }
 
+    // Journal commands when Journal mode is enabled
+    if (settings?.journal?.enabled) {
+      baseCommands.push(
+        {
+          id: "journal-today",
+          label: "Journal: Write Today's Entry",
+          icon: <AddNoteIcon className="w-4.5 h-4.5 stroke-[1.5]" />,
+          action: () => {
+            window.dispatchEvent(new CustomEvent("journal-action", { detail: "today" }));
+            onClose();
+          },
+        },
+        {
+          id: "journal-dream",
+          label: "Journal: Record a Dream",
+          icon: <AddNoteIcon className="w-4.5 h-4.5 stroke-[1.5]" />,
+          action: () => {
+            window.dispatchEvent(new CustomEvent("journal-action", { detail: "dream" }));
+            onClose();
+          },
+        },
+        {
+          id: "journal-home",
+          label: "Journal: Open Home Dashboard",
+          icon: <ZenIcon className="w-4.5 h-4.5 stroke-[1.5]" />,
+          action: () => {
+            window.dispatchEvent(new CustomEvent("journal-navigate", { detail: "home" }));
+            onClose();
+          },
+        },
+        {
+          id: "journal-entries",
+          label: "Journal: Open Entries",
+          icon: <AddNoteIcon className="w-4.5 h-4.5 stroke-[1.5]" />,
+          action: () => {
+            window.dispatchEvent(new CustomEvent("journal-navigate", { detail: "entries" }));
+            onClose();
+          },
+        },
+        {
+          id: "journal-insights",
+          label: "Journal: Open Insights",
+          icon: <MarkdownIcon className="w-4.5 h-4.5 stroke-[1.5]" />,
+          action: () => {
+            window.dispatchEvent(new CustomEvent("journal-navigate", { detail: "insights" }));
+            onClose();
+          },
+        },
+        {
+          id: "journal-memories",
+          label: "Journal: Open On This Day",
+          icon: <FolderIcon className="w-4.5 h-4.5 stroke-[1.5]" />,
+          action: () => {
+            window.dispatchEvent(new CustomEvent("journal-navigate", { detail: "memories" }));
+            onClose();
+          },
+        },
+      );
+    }
+
     // Focus mode and source toggle
     baseCommands.push(
       {

@@ -1,0 +1,12 @@
+{
+  "productName": "Scratch Plus Preview",
+  "identifier": "com.phunguyen.scratchplus.preview",
+  "bundle": {
+    "createUpdaterArtifacts": false
+  },
+  "plugins": {
+    "updater": {
+      "endpoints": []
+    }
+  }
+}

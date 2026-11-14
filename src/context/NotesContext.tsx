@@ -111,6 +111,7 @@ export function NotesProvider({ children }: { children: ReactNode }) {
   const selectNote = useCallback(async (id: string) => {
     const requestId = ++selectRequestIdRef.current;
     try {
+      window.dispatchEvent(new Event("journal-open-editor"));
       if (pendingNewNoteIdRef.current !== id) {
         pendingNewNoteIdRef.current = null;
       }
@@ -157,7 +158,16 @@ export function NotesProvider({ children }: { children: ReactNode }) {
           targetFolder = selectedNoteIdRef.current.substring(0, lastSlash);
         }
       }
+      // General notes should not accidentally become undated Dream entries.
+      if (targetFolder) {
+        try {
+          const settings = await notesService.getSettings();
+          const root = settings.journal?.root?.trim();
+          if (root && (targetFolder === `${root}/Dreams` || targetFolder.startsWith(`${root}/Dreams/`))) targetFolder = undefined;
+        } catch { targetFolder = undefined; }
+      }
       const note = await notesService.createNote(targetFolder);
+      window.dispatchEvent(new Event("journal-open-editor"));
       selectRequestIdRef.current += 1;
       pendingNewNoteIdRef.current = note.id;
       // Mark as recently saved to ignore file-change events from our own creation
